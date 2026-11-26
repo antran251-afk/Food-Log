@@ -1,0 +1,418 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="apple-mobile-web-app-capable" content="yes"><title>Food Log</title>
+<style>
+*{box-sizing:border-box}body{margin:auto;max-width:780px;background:#f6f4ec;color:#233c32;font:16px system-ui;padding:20px}header,nav,.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}header{justify-content:center;flex-direction:column;margin-bottom:14px}h1,h2{font-family:Georgia,serif;font-weight:normal}h1{font-size:2.6rem;margin:10px 0}nav{margin:14px 0 20px}button,input,select{font:inherit;border:1px solid #bac4b6;border-radius:10px;padding:10px;max-width:100%}button{background:#fff;color:#234738;cursor:pointer}button.active,button.primary{background:#265740;color:white}section,article{background:#fffefa;padding:20px;border-radius:18px;margin:12px 0}section.hero{background:#244c3d;color:white}.hero strong{font:3rem Georgia}label{display:grid;gap:4px;margin:10px 0;font-size:.9rem}input,select{min-width:0;width:100%;background:white;color:#22372c}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:0 10px}small{color:#536757}p{line-height:1.45}video{width:100%;max-height:38vh;object-fit:contain;background:#22372c;margin-top:8px}hr{border:0;border-top:1px solid #ddd}button:disabled{opacity:.55}
+#week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;max-width:480px;margin:4px auto 0}
+.week-heading{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;gap:8px;align-items:center;text-align:center;margin-bottom:6px;grid-column:1/-1}
+#week button{padding:5px 0;min-height:44px}
+#prevWeek,#nextWeek{font-size:1.2rem}
+.saved-foods{list-style:none;margin:0;padding:0}.saved-foods li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0}.saved-foods li+li{border-top:1px solid #ddd}.saved-foods small{display:block}.saved-foods button{flex-shrink:0}
+.week-day span{display:block;font-size:.75rem}
+.chart{display:grid;gap:8px;margin:16px 0}
+.chart-row{display:grid;grid-template-columns:4.5em minmax(0,1fr) 6em;gap:8px;align-items:center;font-size:.85rem}
+.chart-track{position:relative;background:#eaece4;height:16px;border-radius:4px}
+.chart-bar{display:block;height:100%;background:#387457;border-radius:4px}
+.chart-goal{position:absolute;top:-2px;bottom:-2px;border-left:2px dashed #74543a}
+.chart-value{text-align:right}
+.suggestion{display:block;margin:0 0 8px}
+</style><header><h1>Food Log</h1><input aria-label="Daily date" type=date id=day style="width:auto"></header><div id="week" role="group" aria-label="Week navigation"></div><nav id=nav></nav><main id=main></main><p id=status role=status></p>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), id=()=>crypto.randomUUID(), key='food-log.v1';
+const nutrients=['Calories','Protein (g)','Carbs (g)','Fat (g)','Fiber (g)','Sodium (mg)','Potassium (mg)','Iron (mg)','Vitamin C (mg)'];
+let db=JSON.parse(localStorage.getItem(key)||'{"foods":[],"logs":[],"goals":[]}'),tab='Daily',camera,scanVersion=0,scanTimer,scannerLibrary,lookupRequest;
+const dateKey=d=>[d.getFullYear(),String(d.getMonth()+1).padStart(2,'0'),String(d.getDate()).padStart(2,'0')].join('-');
+const weekdays=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const weekLabel=new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',year:'numeric'});
+const profileFields=[
+  ['weight','Current weight (lb)',0.01],
+  ['height','Height (in)',0.01],
+  ['bodyFat','Body fat (%)',0,100],
+  ['goalWeight','Goal weight (lb)',0.01]
+];
+const parseDay=value=>new Date(value+'T12:00:00');
+function addDays(date, days) {
+  const result=new Date(date);
+  result.setDate(result.getDate()+days);
+  return result;
+}
+function monday(date) {
+  return addDays(date,-((date.getDay()+6)%7));
+}
+function selectDay(value) {
+  const latest=dateKey(addDays(monday(new Date()),6));
+  $('day').value=value&&value<=latest?value:dateKey(new Date());
+  render();
+}
+function renderWeek() {
+  const selected=val('day');
+  const start=monday(parseDay(selected));
+  const end=addDays(start,6);
+  const nextDisabled=dateKey(start)>=dateKey(monday(new Date()));
+  $('day').max=dateKey(addDays(monday(new Date()),6));
+  $('week').innerHTML='<div class="week-heading">'+
+    '<button type="button" id="prevWeek" aria-label="Previous week">←</button>'+
+    '<strong>'+esc(weekLabel.formatRange?.(start,end)??weekLabel.format(start)+' – '+weekLabel.format(end))+'</strong>'+
+    '<button type="button" id="nextWeek" aria-label="Next week" '+(nextDisabled?'disabled':'')+'>→</button></div>'+
+    weekdays.map((name,i)=>{
+      const date=addDays(start,i);
+      const value=dateKey(date);
+      const active=value===selected;
+      return '<button type="button" class="week-day '+(active?'active':'')+'" aria-pressed="'+active+
+        '" aria-label="'+esc(name+' '+weekLabel.format(date))+'" data-day="'+value+'"><span>'+name+'</span>'+date.getDate()+'</button>';
+    }).join('');
+  $('prevWeek').onclick=()=>selectDay(dateKey(addDays(parseDay(selected),-7)));
+  $('nextWeek').onclick=()=>selectDay(dateKey(addDays(parseDay(selected),7)));
+  $('week').querySelectorAll('[data-day]').forEach(button=>{
+    button.onclick=()=>selectDay(button.dataset.day);
+  });
+}
+$('day').value=dateKey(new Date());
+const field=(name,label,type='text',extra='')=>'<label>'+esc(label)+'<input id="'+name+'" type="'+type+'" '+extra+'></label>';
+const num=(name,label,required=false)=>field(name,label,'number','step="any" min="0" '+(required?'required':''));
+const val=k=>$(k).value, food=k=>db.foods.find(f=>f.id===k), fmt=n=>Number(n.toFixed(1)), msg=s=>$('status').textContent=s;
+function save(){try{localStorage.setItem(key,JSON.stringify(db))}catch(e){alert('Storage failed. Export a backup before closing.');throw e}}
+function opts(batch=false){return db.foods.filter(f=>!batch||!f.parts).map(f=>'<option value="'+esc(f.id)+'">'+esc(f.name)+'</option>').join('')}
+function total(rows,i){return rows.reduce((a,r)=>a+(r.n[i]??0),0)}
+function render(next=tab){stopScan();lookupRequest?.abort();tab=next;msg('');renderWeek();$('nav').innerHTML=['Daily','Foods','Recipe','Progress','Setup','Backup'].map(t=>'<button class="'+(tab===t?'active':'')+'" onclick="render(this.textContent)">'+t+'</button>').join('');({Daily:diary,Foods:foods,Recipe:recipes,Progress:progress,Setup:setup,Backup:backup})[tab]()}
+$('day').onchange=()=>selectDay(val('day'));
+function diary(){let rows=db.logs.filter(r=>r.day===val('day'));$('main').innerHTML='<section class="hero">Daily calories<br><strong>'+fmt(total(rows,0))+'</strong> kcal'+(db.goals[0]?' / '+db.goals[0]:'')+'<p>'+nutrients.slice(1,4).map((n,i)=>fmt(total(rows,i+1))+' g '+n.split(' ')[0].toLowerCase()).join(' · ')+'</p></section><section><h2>Log a portion</h2>'+ (db.foods.length?'<form id="log"><label>Food or cooked batch<select id="which">'+opts()+'</select></label><div class="grid">'+field('amount','Amount','number','required step="any"')+'<label>Unit<select id="unit"></select></label></div><p id="preview"></p><button class="primary">Add to daily log</button></form>':'<button onclick="render(\'Foods\')">Add your first food</button>')+'</section><section><h2>Daily entries</h2>'+ (rows.map(r=>'<p><b>'+esc(r.name)+'</b> · '+fmt(r.g)+' g · '+fmt(r.n[0])+' kcal <button onclick="editLog(\''+r.id+'\')">Edit</button> <button onclick="repeatLog(\''+r.id+'\')">Repeat</button></p>').join('')||'No entries for this day.')+'</section>';
+if(!$('log'))return;let grams=()=>{let a=Number(val('amount')),u=val('unit'),f=food(val('which'));return u==='Removal (g)'?Math.abs(a):a*({'oz':28.349523125,'servings':f.base,'cups':f.cup}[u]||1)};
+function preview(){let g=grams();$('preview').textContent=g>0?fmt(g)+' g · '+fmt(g*food(val('which')).n[0]/food(val('which')).base)+' kcal':''}
+$('which').onchange=()=>{let f=food(val('which'));$('unit').innerHTML=['g','Removal (g)','oz','servings',...(f.cup?['cups']:[])].map(x=>'<option>'+x+'</option>').join('');preview()};$('which').onchange();$('log').oninput=preview;$('log').onsubmit=e=>{e.preventDefault();let f=food(val('which')),g=grams();if(!(g>0))return msg('Enter a positive portion or choose Removal (g).');db.logs.push({id:id(),day:val('day'),name:f.name,g,n:f.n.map(x=>x===null?null:x*g/f.base)});save();render()}}
+function repeatLog(k){db.logs.push({...db.logs.find(r=>r.id===k),id:id(),day:val('day')});save();render()}
+function editLog(k){let r=db.logs.find(r=>r.id===k),s=prompt('Portion in grams. Enter 0 to remove.',r.g);if(s===null||s.trim()==='')return;let g=Number(s);if(!Number.isFinite(g)||g<0)return;if(g===0)db.logs=db.logs.filter(x=>x!==r);else{r.n=r.n.map(x=>x===null?null:x*g/r.g);r.g=g}save();render()}
+function savedFoods() {
+  const items=db.foods.filter(item=>!item.parts).sort((a,b)=>a.name.localeCompare(b.name));
+  return '<section><h2>Saved foods</h2>'+(items.length?
+    '<ul class="saved-foods">'+items.map(item=>
+      '<li><div><strong>'+esc(item.name)+'</strong><small>'+
+      (item.n[0]==null?'Calories unknown':fmt(item.n[0])+' kcal')+' per '+fmt(item.base)+' g</small></div>'+
+      '<button type="button" data-food="'+esc(item.id)+'" aria-label="'+esc('Log '+item.name)+'">Log portion</button></li>'
+    ).join('')+'</ul>':
+    '<p>Foods you save from a barcode or enter below will appear here.</p>')+'</section>';
+}
+function foods(){
+  $('main').innerHTML=savedFoods()+'<section><h2>Package lookup</h2><form id="barcodeForm">'+
+    field('code','Barcode','text','inputmode="numeric" enterkeyhint="search" autocomplete="off"')+
+    '<div class="row"><button type="button" onclick="scan()">Scan with camera</button>'+
+    '<button>Look up code</button></div></form>'+
+    '<p id="lookupInfo" role="status"></p>'+
+    '<div id="scanControls" hidden><div class="row">'+
+    '<button id="captureBarcode" type="button" disabled>Capture barcode</button>'+
+    '<button type="button" onclick="stopScan();$(\'lookupInfo\').textContent=\'Camera stopped.\'">Stop camera</button>'+
+    '</div><video id="video" playsinline muted></video></div>'+
+    '<label>Scan a barcode photo<input id="barcodePhoto" type="file" accept="image/*"></label>'+
+    '<small>Product data from <a href="https://world.openfoodfacts.org/">Open Food Facts</a> (ODbL).</small></section><section><h2>Save a food</h2><form id="newFood">'+field('name','Food name','text','required')+'<div class="grid">'+num('base','Grams per serving',true)+num('cup','Grams per cup (optional)')+'</div><p>Nutrition per serving</p><div class="grid">'+nutrients.map((n,i)=>num('n'+i,n,i===0)).join('')+'</div><button class="primary">Save food</button></form></section>';
+$('newFood').onsubmit=e=>{e.preventDefault();if(+val('base')<=0)return msg('Serving weight must exceed zero.');let code=barcodeDigits(val('code'));if(code&&db.foods.some(f=>sameBarcode(f.code,code)))return lookup();db.foods.push({id:id(),name:val('name'),base:+val('base'),cup:+val('cup'),code,n:nutrients.map((_,i)=>val('n'+i)===''?null:+val('n'+i))});save();render('Daily');$('which').value=db.foods.at(-1).id;$('which').onchange()}
+  $('barcodeForm').onsubmit=event=>{event.preventDefault();lookup()};
+  $('code').oninput=()=>{
+    lookupRequest?.abort();
+    $('lookupInfo').textContent='';
+  };
+  $('barcodePhoto').onchange=scanPhoto;
+  $('main').querySelectorAll('[data-food]').forEach(button=>{
+    button.onclick=()=>{
+      render('Daily');
+      $('which').value=button.dataset.food;
+      $('which').onchange();
+      $('amount').focus();
+    };
+  });
+}
+function barcodeDigits(value) {
+  return (value||'').replace(/[\s-]/g,'');
+}
+function sameBarcode(a,b) {
+  return a&&b&&barcodeDigits(a).padStart(14,'0')===barcodeDigits(b).padStart(14,'0');
+}
+async function lookup() {
+  stopScan();
+  lookupRequest?.abort();
+  const code=barcodeDigits(val('code'));
+  const info=$('lookupInfo');
+  if(!/^\d{8,14}$/.test(code)){
+    info.textContent='Enter the digits printed below the bars, including the small digits at each end.';
+    return;
+  }
+  $('code').value=code;
+  const saved=db.foods.find(item=>sameBarcode(item.code,code));
+  if(saved){
+    render('Daily');
+    $('which').value=saved.id;
+    $('which').onchange();
+    msg('Loaded '+saved.name+' from your saved foods.');
+    return;
+  }
+  const request=new AbortController();
+  lookupRequest=request;
+  let timedOut=false;
+  const timeout=setTimeout(()=>{timedOut=true;request.abort()},12000);
+  info.textContent='Looking up '+code+'…';
+  try {
+    const alternate=code.length===12?'0'+code:code.length===13&&code.startsWith('0')?code.slice(1):null;
+    let product;
+    for(const candidate of [code,alternate].filter(Boolean)){
+      const url='https://world.openfoodfacts.org/api/v2/product/'+candidate+
+        '.json?fields=product_name,nutriments,serving_size,nutrition_data_per,product_quantity_unit';
+      const response=await fetch(url,{signal:request.signal});
+      if(response.status===404) continue;
+      if(!response.ok) throw Error('Lookup service returned '+response.status);
+      product=(await response.json()).product;
+      if(product) break;
+    }
+    if(request.signal.aborted) return;
+    if(!product){
+      info.textContent='No match for '+code+' in Open Food Facts. Enter the label below and save it for next time.';
+      return;
+    }
+    const n=product.nutriments||{};
+    $('name').value=product.product_name||'';
+    if(n['energy-kcal_100g']==null||!Number.isFinite(Number(n['energy-kcal_100g']))||
+      /ml/i.test(product.nutrition_data_per||'')||/^ml$/i.test(product.product_quantity_unit||'')){
+      info.textContent='Product found. Enter the serving weight and nutrition from the label below.';
+      return;
+    }
+    const serving=product.serving_size?.match(/(\d+(?:[.,]\d+)?)\s*g\b/i);
+    const grams=Number(serving?.[1].replace(',','.'))||100;
+    $('base').value=grams;
+    $('cup').value='';
+    ['energy-kcal','proteins','carbohydrates','fat','fiber','sodium','potassium','iron','vitamin-c'].forEach((name,i)=>{
+      const value=n[name+'_100g'];
+      $('n'+i).value=value==null||!Number.isFinite(Number(value))?'':fmt(value*(i>=5?1000:1)*grams/100);
+    });
+    info.textContent='Product found. Review the values per '+grams+' g and save the food below.';
+  } catch {
+    if(!request.signal.aborted||timedOut){
+      info.textContent='Could not reach Open Food Facts for '+code+'. Try again or enter the label below.';
+    }
+  } finally {
+    clearTimeout(timeout);
+    if(lookupRequest===request) lookupRequest=null;
+  }
+}
+function stopScan() {
+  scanVersion++;
+  clearInterval(scanTimer);
+  camera?.getTracks().forEach(track=>track.stop());
+  camera=null;
+  if($('video')) $('video').srcObject=null;
+  if($('scanControls')) $('scanControls').hidden=true;
+  if($('captureBarcode')) $('captureBarcode').disabled=true;
+}
+async function barcodeReader() {
+  if(!window.ZXingBrowser){
+    scannerLibrary??=new Promise((resolve,reject)=>{
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js';
+      script.onload=resolve;
+      script.onerror=()=>{scannerLibrary=null;script.remove();reject(Error('Scanner library unavailable'))};
+      document.head.append(script);
+    });
+    await scannerLibrary;
+  }
+  return new ZXingBrowser.BrowserMultiFormatReader();
+}
+function readBarcode(reader,source,width,height) {
+  const frame=document.createElement('canvas');
+  for(const rotate of [false,true]){
+    frame.width=rotate?height:width;
+    frame.height=rotate?width:height;
+    const context=frame.getContext('2d',{willReadFrequently:true});
+    if(rotate){context.translate(height,0);context.rotate(Math.PI/2)}
+    context.drawImage(source,0,0,width,height);
+    try {
+      const code=reader.decodeFromCanvas(frame).getText();
+      if(/^\d{8,14}$/.test(code)) return code;
+    } catch {
+      // Try again with a rotated frame or the next camera frame.
+    }
+  }
+}
+function barcodeFound(code) {
+  $('code').value=code;
+  lookup();
+}
+async function scan() {
+  stopScan();
+  lookupRequest?.abort();
+  const version=scanVersion;
+  const info=$('lookupInfo');
+  info.textContent='Opening camera…';
+  try {
+    const reader=await barcodeReader();
+    if(version!==scanVersion) return;
+    const stream=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false
+    });
+    if(version!==scanVersion){stream.getTracks().forEach(track=>track.stop());return}
+    camera=stream;
+    const video=$('video');
+    $('scanControls').hidden=false;
+    video.srcObject=stream;
+    await video.play();
+    if(version!==scanVersion) return;
+    const readFrame=()=>video.videoWidth&&readBarcode(reader,video,video.videoWidth,video.videoHeight);
+    $('captureBarcode').disabled=false;
+    $('captureBarcode').onclick=()=>{
+      const code=readFrame();
+      if(code) barcodeFound(code);
+      else info.textContent='No barcode in that frame. Hold the package steady with all bars visible, then try again.';
+    };
+    info.textContent='Scanning automatically. You can also tap Capture barcode.';
+    scanTimer=setInterval(()=>{
+      const code=readFrame();
+      if(code) barcodeFound(code);
+    },350);
+  } catch {
+    if(version!==scanVersion) return;
+    stopScan();
+    info.textContent='Camera scan unavailable. Use a barcode photo or enter the digits above.';
+  }
+}
+async function scanPhoto(event) {
+  const file=event.target.files[0];
+  event.target.value='';
+  if(!file) return;
+  stopScan();
+  lookupRequest?.abort();
+  const version=scanVersion;
+  const info=$('lookupInfo');
+  info.textContent='Reading barcode photo…';
+  const url=URL.createObjectURL(file);
+  try {
+    const image=new Image();
+    image.src=url;
+    await image.decode();
+    const reader=await barcodeReader();
+    if(version!==scanVersion) return;
+    const code=readBarcode(reader,image,image.naturalWidth,image.naturalHeight);
+    if(code) barcodeFound(code);
+    else info.textContent='No barcode found in that photo. Try a sharper photo or enter the digits above.';
+  } catch {
+    if(version===scanVersion) info.textContent='Could not read that photo. Try another photo or enter the digits above.';
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+function recipes(){let templates=db.foods.filter(f=>f.parts);$('main').innerHTML='<section><h2>Save a recipe</h2><p>Enter the ingredients and finished weight for one cooked batch.</p>'+(!opts(true)?'<button onclick="render(\'Foods\')">Save an ingredient first</button>':'<form id="batch"><label>Start from<select id="template"><option value="">New recipe</option>'+templates.map(f=>'<option value="'+f.id+'">'+esc(f.name)+'</option>').join('')+'</select></label>'+field('title','Recipe name','text','required')+'<div id="ingredients"></div><button type="button" onclick="ingredient()">Add ingredient</button>'+num('yield','Finished cooked weight (g)',true)+'<button class="primary">Save recipe</button></form>')+'</section>';if(!$('batch'))return;ingredient();$('template').onchange=()=>{let f=food(val('template'));$('ingredients').innerHTML='';$('title').value=f?.name||'';$('yield').value='';if(f)f.parts.forEach(p=>ingredient(p));else ingredient()};$('batch').onsubmit=e=>{e.preventDefault();let parts=[...$('ingredients').children].map(el=>({food:el.querySelector('select').value,g:+el.querySelector('input').value}));if(!parts.length||parts.some(p=>p.g<=0)||+val('yield')<=0)return msg('Add an ingredient and enter positive weights.');let n=nutrients.map((_,i)=>parts.some(p=>food(p.food).n[i]===null)?null:parts.reduce((sum,p)=>sum+food(p.food).n[i]*p.g/food(p.food).base,0));db.foods.push({id:id(),name:val('title')+'',base:+val('yield'),parts,n});save();render('Daily');$('which').value=db.foods.at(-1).id;$('which').onchange()}}
+function ingredient(p){let el=document.createElement('div');el.className='grid';el.innerHTML='<label>Ingredient<select>'+opts(true)+'</select></label><label>Weight (g)<input type="number" min="0" step="any" required></label><button type="button" onclick="this.parentElement.remove()">Remove</button>';if(p){el.querySelector('select').value=p.food;el.querySelector('input').value=p.g}$('ingredients').append(el)}
+function progress() {
+  const end=val('day');
+  const start=dateKey(addDays(parseDay(end),-6));
+  const rows=db.logs.filter(row=>row.day>=start&&row.day<=end);
+  const selectedRows=rows.filter(row=>row.day===end);
+  $('main').innerHTML='<section><h2>Seven days ending '+esc(end)+'</h2><p>'+
+    new Set(rows.map(row=>row.day)).size+' days logged · averages span all seven days</p>'+
+    '<label>Chart nutrient<select id="chartNutrient">'+nutrients.map(name=>'<option>'+name+'</option>').join('')+
+    '</select></label><div id="nutrientChart"></div>'+
+    '<button onclick="render(\'Setup\')">Edit daily goals</button>'+
+    nutrients.map((name,i)=>{
+      const goal=db.goals[i];
+      return '<hr><b>'+name+'</b><p>'+fmt(total(selectedRows,i))+' on selected day · '+
+        fmt(total(rows,i)/7)+' daily average'+(goal?' · daily goal '+goal:'')+
+        (rows.some(row=>row.n[i]==null)?' · incomplete data':'')+'</p>';
+    }).join('')+'</section>';
+  $('chartNutrient').onchange=()=>renderChart(end,rows);
+  renderChart(end,rows);
+}
+function renderChart(end, rows) {
+  const index=$('chartNutrient').selectedIndex;
+  const goal=db.goals[index]||0;
+  const days=Array.from({length:7},(_,i)=>{
+    const date=addDays(parseDay(end),i-6);
+    const entries=rows.filter(row=>row.day===dateKey(date));
+    return {
+      label:date.toLocaleDateString(undefined,{month:'short',day:'numeric'}),
+      value:total(entries,index),
+      logged:entries.length>0,
+      incomplete:entries.some(row=>row.n[index]==null),
+      known:entries.some(row=>row.n[index]!=null)
+    };
+  });
+  const scale=Math.max(1,goal,...days.map(day=>day.value));
+  $('nutrientChart').innerHTML='<div class="chart">'+days.map(day=>{
+    const value=day.known?fmt(day.value)+(day.incomplete?'+':''):day.logged?'Unknown':'No log';
+    return '<div class="chart-row"><span>'+esc(day.label)+'</span>'+
+      '<div class="chart-track" aria-hidden="true"><span class="chart-bar" style="width:'+100*day.value/scale+'%"></span>'+
+      (goal>0?'<span class="chart-goal" style="left:'+100*goal/scale+'%"></span>':'')+
+      '</div><span class="chart-value">'+value+'</span></div>';
+  }).join('')+'</div>'+
+    (goal>0?'<p><small>Dashed line · daily goal '+goal+'</small></p>':'')+
+    (days.some(day=>day.known&&day.incomplete)?'<p><small>+ Some entries are missing this nutrient.</small></p>':'');
+}
+const dailyValues=[2000,50,275,78,28,2300,4700,18,90];
+function suggestedGoals(weight) {
+  const values=[...dailyValues];
+  if(Number.isFinite(weight)&&weight>0) values[1]=fmt(weight*0.45359237*0.8);
+  return values;
+}
+function setup() {
+  $('main').innerHTML='<form id="setupForm"><section><h2>Body measurements</h2><div class="grid">'+
+    profileFields.map(([key,label,min,max])=>key==='height'?
+      field('heightFeet','Height (ft)','number','step="1" min="0"')+
+      num('heightInches','Height (in)'):
+      field(key,label,'number','step="any" min="'+min+'"'+(max===undefined?'':' max="'+max+'"'))).join('')+
+    '</div></section><section><h2>Daily nutrition goals</h2><div class="grid">'+
+    nutrients.map((name,i)=>'<div>'+num('goal'+i,name)+'<small class="suggestion" id="suggest'+i+'"></small></div>').join('')+
+    '</div><p><small>Calories and most nutrients use the FDA’s 2,000-calorie reference. A personalized calorie estimate also uses age, sex, and activity level. Sodium is listed as a limit. '+
+    '<a href="https://www.fda.gov/food/nutrition-facts-label/daily-value-nutrition-and-supplement-facts-labels">FDA Daily Values</a> · '+
+    '<a href="https://www.nal.usda.gov/human-nutrition-and-food-safety/dri-calculator">USDA intake calculator</a> · '+
+    '<a href="https://nap.nationalacademies.org/skim.php?chap=565-578&amp;record_id=25353">Adult protein reference</a></small></p>'+
+    '<div class="row"><button type="button" id="applySuggestions">Fill blank goals</button>'+
+    '<button class="primary">Save setup</button></div></section></form>';
+  for(const [key] of profileFields) if(key!=='height') $(key).value=db.profile?.[key]??'';
+  const height=db.profile?.height;
+  $('heightFeet').value=height==null?'':Math.floor(height/12);
+  $('heightInches').value=height==null?'':Number((height%12).toPrecision(12));
+  nutrients.forEach((_,i)=>$('goal'+i).value=db.goals[i]||'');
+  function showSuggestions() {
+    const weight=Number(val('weight'));
+    suggestedGoals(weight).forEach((value,i)=>{
+      const source=i===1&&weight>0?' · adult weight-based reference':'';
+      $('suggest'+i).textContent=(i===5?'Suggested limit ':'Suggested ')+value+source;
+    });
+  }
+  $('weight').oninput=showSuggestions;
+  showSuggestions();
+  $('applySuggestions').onclick=()=>{
+    suggestedGoals(Number(val('weight'))).forEach((value,i)=>{
+      if(val('goal'+i)==='') $('goal'+i).value=value;
+    });
+  };
+  $('setupForm').onsubmit=e=>{
+    e.preventDefault();
+    const inches=$('heightInches');
+    const height=Number(val('heightFeet'))*12+Number(inches.value);
+    if(Number(inches.value)>=12||(height===0&&(val('heightFeet')!==''||inches.value!==''))){
+      inches.setCustomValidity(Number(inches.value)>=12?'Enter fewer than 12 inches.':'Enter a height greater than zero.');
+      inches.reportValidity();
+      inches.setCustomValidity('');
+      return;
+    }
+    const profile=Object.fromEntries(profileFields.filter(([key])=>key!=='height')
+      .map(([key])=>[key,val(key)===''?null:+val(key)]));
+    profile.height=height||null;
+    if(!validProfile(profile)) return msg('Check the body measurements and try again.');
+    const goals=nutrients.map((_,i)=>+val('goal'+i));
+    const updated={...db,profile,goals};
+    try {
+      localStorage.setItem(key,JSON.stringify(updated));
+      db=updated;
+      msg('Setup saved.');
+    } catch {
+      msg('Could not save setup. Check available storage and try again.');
+    }
+  };
+}
+function validProfile(profile) {
+  return profile===undefined||(
+    profile!==null&&typeof profile==='object'&&!Array.isArray(profile)&&
+    profileFields.every(([key,,min,max])=>{
+      const value=profile[key];
+      return value==null||(Number.isFinite(value)&&value>=min&&(max===undefined||value<=max));
+    })
+  );
+}
+function backup(){$('main').innerHTML='<section><h2>Backup & restore</h2><p>Save a copy of your foods, recipes, daily log, and setup. Restoring replaces this device’s saved data.</p><button id="export">Export backup</button><label>Restore backup<input id="restore" type=file accept=".json"></label></section>';$('export').onclick=()=>{let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(db)],{type:'application/json'}));a.download='food-log-'+val('day')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)};$('restore').onchange=async e=>{try{let b=JSON.parse(await e.target.files[0].text());let uuid=x=>typeof x==='string'&&/^[a-f0-9-]{36}$/i.test(x),nums=x=>Array.isArray(x)&&x.length===nutrients.length&&x.every(v=>v===null||Number.isFinite(v)),positive=x=>Number.isFinite(x)&&x>0;if(!validProfile(b.profile)||!Array.isArray(b.foods)||!Array.isArray(b.logs)||!Array.isArray(b.goals)||b.goals.length>nutrients.length||!b.goals.every(Number.isFinite)||!b.foods.every(f=>uuid(f.id)&&typeof f.name==='string'&&positive(f.base)&&nums(f.n)&&(!f.parts||Array.isArray(f.parts)&&f.parts.every(p=>positive(p.g)&&b.foods.some(x=>x.id===p.food&&!x.parts))))||!b.logs.every(r=>uuid(r.id)&&typeof r.name==='string'&&positive(r.g)&&nums(r.n)&&/^\d{4}-\d\d-\d\d$/.test(r.day)))throw Error();if(confirm('Replace local data with this backup?')){localStorage.setItem(key,JSON.stringify(b));db=b;render('Daily')}}catch{msg('Could not restore this backup.')}}}
+render();
+</script></html>
